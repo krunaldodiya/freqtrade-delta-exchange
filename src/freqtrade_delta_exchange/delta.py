@@ -66,7 +66,10 @@ class Delta(Exchange):
         "stoploss_order_types": {"limit": "limit", "market": "market"},
         "stoploss_blocks_assets": False,
         "stop_price_prop": "stopPrice",
-        "exchange_has_overrides": {},
+        "exchange_has_overrides": {
+            # Delta has no fetchFundingHistory; tell freqtrade not to call it live.
+            "fetchFundingHistory": False,
+        },
         "has_delisting": True,
     }
 
@@ -324,10 +327,12 @@ class Delta(Exchange):
                     "reduce_only": True,
                 },
             )
+            logger.info("Delta stoploss response: id=%s status=%s type=%s side=%s filled=%s",
+                        order.get("id"), order.get("status"), order.get("type"), order.get("side"), order.get("filled"))
         except ccxt.ExchangeError as e:
             err = self._extract_error(e)
             if err.get("code") == "no_position_for_reduce_only":
-                logger.debug("Delta stoploss skipped: no open position (already closed)")
+                logger.warning("Delta stoploss skipped: no open position (already closed)")
                 return {
                     "id": f"skipped_{self._api.milliseconds()}",
                     "status": "closed",
@@ -337,24 +342,60 @@ class Delta(Exchange):
                     "price": 0,
                 }
             raise
-        return order
+
+        # Delta returns a stop-market order as type='market' with stop_price in info.
+        # freqtrade needs to recognize this as a stoploss order, so normalize the
+        # ccxt response to the standard stoploss shape.
+        # IMPORTANT: always report the newly created order as 'open' here. Delta may
+        # return status='closed' immediately when the stop triggers on placement, but
+        # freqtrade's handle_stoploss_on_exchange only fetches/updates open_sl_orders.
+        # Returning 'open' lets the next tick fetch the real status and close the trade.
+        normalized = {
+            "id": order["id"],
+            "status": "open",
+            "type": "stoploss",
+            "side": close_side,
+            "symbol": pair,
+            "amount": float(order.get("amount", amount) or amount),
+            "filled": float(order.get("filled", 0) or 0),
+            "remaining": float(order.get("remaining", amount) or amount),
+            "price": float(order.get("price") or stop_price or 0),
+            "average": float(order.get("average") or 0),
+            "stopPrice": stop_price,
+            "timestamp": int(order.get("timestamp") or self._api.milliseconds()),
+            "datetime": order.get("datetime") or self._api.iso8601(self._api.milliseconds()),
+            "info": order.get("info", {}),
+            "fee": order.get("fee"),
+            "cost": order.get("cost"),
+        }
+        return normalized
 
     @staticmethod
     def _extract_error(error: Exception) -> dict:
         """Best-effort parse of a ccxt ExchangeError payload."""
         try:
-            msg = str(error)
-            # ccxt often wraps the exchange body as a stringified JSON dict.
-            start = msg.find("{")
-            end = msg.rfind("}")
-            if start != -1 and end != -1:
-                import json as _json
-                payload = _json.loads(msg[start:end + 1])
-                if isinstance(payload, dict):
-                    return payload.get("error", payload)
+            return error.args[0] if isinstance(error.args[0], dict) else json.loads(error.args[0])
         except Exception:
-            pass
-        return {}
+            return {"message": str(error)}
+
+    def fetch_stoploss_order(self, order_id: str, pair: str, params: dict | None = None) -> dict:
+        """Fetch a stop order from Delta and normalize status so freqtrade tracks it.
+
+        ccxt.delta returns stop orders with status 'open' or 'closed' depending on
+        whether the trigger has fired. Some Delta responses also report status as
+        'active'/'inactive' in the raw info; we normalize these to 'open'/'closed'.
+        """
+        order = super().fetch_stoploss_order(order_id, pair, params)
+        status = order.get("status")
+        info = order.get("info", {})
+        # Delta raw status can be 'open', 'closed', 'triggered', 'active', 'inactive'
+        raw_status = str(info.get("status") or status).lower()
+        if raw_status in ("active", "open"):
+            order["status"] = "open"
+        elif raw_status in ("inactive", "cancelled", "canceled", "filled", "triggered", "closed"):
+            order["status"] = "closed"
+        logger.info("Delta fetch_stoploss_order: id=%s raw_status=%s normalized=%s", order_id, raw_status, order.get("status"))
+        return order
 
     # ------------------------------------------------------------------ #
     # Funding rate history (freqtrade calls self._fetch_funding_rate_history)
