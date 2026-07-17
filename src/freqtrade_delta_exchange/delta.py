@@ -272,14 +272,7 @@ class Delta(Exchange):
 
         close_side = "sell" if side == "buy" else "buy"
 
-        # Get product_id from markets
-        market = self.markets.get(pair, {})
-        product_id = market.get("id") or market.get("info", {}).get("id")
-        if not product_id:
-            # fallback: parse from symbol
-            product_id = pair.split("/")[0] + pair.split("/")[1].split(":")[0]
-
-        # Get host from config
+        # Get host from config (needed for product_id resolution + order placement)
         ex_cfg = self._config.get("exchange", {})
         if ex_cfg.get("india"):
             host = (
@@ -289,6 +282,27 @@ class Delta(Exchange):
             )
         else:
             host = self._api.urls.get("api", {}).get("private", "https://api.delta.exchange")
+
+        # Get product_id: Delta's REST API expects an integer product_id.
+        # ccxt's market dict may not include it, so resolve via the symbol.
+        market = self.markets.get(pair, {})
+        product_id = market.get("id") or market.get("info", {}).get("product_id")
+        if not product_id or (isinstance(product_id, str) and not product_id.isdigit()):
+            # Resolve from Delta's products endpoint
+            delta_symbol = pair.split("/")[0] + pair.split("/")[1].split(":")[0]
+            try:
+                import requests
+                r = requests.get(f"{host}/v2/products", headers={"User-Agent": "freqtrade"}, timeout=10)
+                products = r.json().get("result", [])
+                for p in products:
+                    if p.get("symbol") == delta_symbol:
+                        product_id = p["id"]
+                        break
+            except Exception:
+                pass
+        if not product_id or (isinstance(product_id, str) and not product_id.isdigit()):
+            raise ccxt.ExchangeError(f"Could not resolve product_id for {pair}")
+        product_id = int(product_id)
 
         api_key = ex_cfg.get("key", "") or self._api.apiKey or ""
         api_secret = ex_cfg.get("secret", "") or self._api.secret or ""
