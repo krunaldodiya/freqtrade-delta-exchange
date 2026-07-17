@@ -247,7 +247,7 @@ class Delta(Exchange):
         }
 
     # ------------------------------------------------------------------ #
-    # Stop orders (your strategy relies on stops)
+    # Stop orders (Delta has no ccxt stop support -> raw REST)
     # ------------------------------------------------------------------ #
     def create_stoploss(
         self,
@@ -260,16 +260,83 @@ class Delta(Exchange):
     ) -> dict:
         """Place a stop-market order on Delta to close the open position.
 
-        Maps freqtrade's entry 'side' to the opposite close side.
+        ccxt.delta's createStopMarketOrder is not supported, so we call
+        Delta's REST API directly with a market order + stop_price. Maps
+        freqtrade's entry 'side' to the opposite close side. Returns a
+        ccxt-compatible order dict so freqtrade can track it.
         """
+        import hashlib
+        import hmac
+        import json as _json
+        import time
+
         close_side = "sell" if side == "buy" else "buy"
-        return self._api.create_stop_market_order(
-            pair,
-            close_side,
-            amount,
-            stop_price,
-            {"reduceOnly": True, "leverage": leverage},
-        )
+
+        # Get product_id from markets
+        market = self.markets.get(pair, {})
+        product_id = market.get("id") or market.get("info", {}).get("id")
+        if not product_id:
+            # fallback: parse from symbol
+            product_id = pair.split("/")[0] + pair.split("/")[1].split(":")[0]
+
+        # Get host from config
+        ex_cfg = self._config.get("exchange", {})
+        if ex_cfg.get("india"):
+            host = (
+                "https://cdn-ind.testnet.deltaex.org"
+                if ex_cfg.get("sandbox")
+                else "https://cdn.india.deltaex.org"
+            )
+        else:
+            host = self._api.urls.get("api", {}).get("private", "https://api.delta.exchange")
+
+        api_key = ex_cfg.get("key", "")
+        api_secret = ex_cfg.get("secret", "")
+
+        ts = str(int(time.time()))
+        method = "POST"
+        path = "/v2/orders"
+        payload = _json.dumps({
+            "product_id": int(product_id) if str(product_id).isdigit() else product_id,
+            "size": amount,
+            "side": close_side,
+            "order_type": "market_order",
+            "stop_price": str(stop_price),
+            "reduce_only": "true",
+        })
+
+        sig_data = method + ts + path + "" + payload
+        sig = hmac.new(api_secret.encode(), sig_data.encode(), hashlib.sha256).hexdigest()
+
+        headers = {
+            "api-key": api_key,
+            "timestamp": ts,
+            "signature": sig,
+            "User-Agent": "freqtrade-delta-exchange",
+            "Content-Type": "application/json",
+        }
+
+        import requests
+        r = requests.post(f"{host}{path}", data=payload, headers=headers, timeout=10)
+        resp = r.json()
+
+        if not resp.get("success"):
+            err = resp.get("error", resp)
+            raise ccxt.ExchangeError(f"Delta stop order failed: {err}")
+
+        order = resp.get("result", {})
+        return {
+            "id": str(order.get("id", "")),
+            "status": "open",
+            "type": "stop_market",
+            "side": close_side,
+            "amount": amount,
+            "price": stop_price,
+            "stopPrice": stop_price,
+            "symbol": pair,
+            "reduceOnly": True,
+            "info": order,
+        }
 
     # ------------------------------------------------------------------ #
     # Funding rate history (freqtrade calls self._fetch_funding_rate_history)
