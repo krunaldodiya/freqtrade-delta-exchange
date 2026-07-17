@@ -208,6 +208,22 @@ class Delta(Exchange):
             if not accept_fail:
                 raise
 
+    def _set_leverage(self, leverage: float, pair: str, accept_fail: bool = False) -> None:
+        """Set leverage. Delta's demo host sometimes returns 'unsupported' for
+        set_leverage; tolerate that gracefully (Delta defaults to 1x when
+        leverage can't be set). Honour accept_fail for genuine failures.
+        """
+        try:
+            self._api.set_leverage(leverage, pair)
+        except (ccxt.ExchangeError, ccxt.NotSupported) as e:
+            if "unsupported" in str(e).lower():
+                pass  # Delta demo doesn't support the leverage endpoint
+            elif not accept_fail:
+                raise
+        except Exception:
+            if not accept_fail:
+                raise
+
     # ------------------------------------------------------------------ #
     # Funding (freqtrade futures reads a ccxt funding-rate dict)
     # ------------------------------------------------------------------ #
