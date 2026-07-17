@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "freqtrade-delta-exchange"
-version = "0.2.7"
+version = "0.2.8"
 description = "Delta Exchange (delta.exchange) broker adapter for freqtrade — installable freqtrade plugin (REST Phase-1, websockets Phase-2)."
 readme = "README.md"
 requires-python = ">=3.11"

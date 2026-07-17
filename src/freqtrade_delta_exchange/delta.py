@@ -54,12 +54,6 @@ class Delta(Exchange):
         "ws_enabled": True,  # Phase2: native WS via DeltaWSClient
         "stoploss_on_exchange": True,
         "exchange_has_overrides": {
-            # ccxt.delta under-reports these; we implement them in the class
-            # (get_leverage_tiers) or make them no-ops (funding history).
-            "fetchLeverageTiers": True,
-            # freqtrade calls _api.fetch_funding_history for open-trade fee calc;
-            # we bind a no-op on our client instance in _init_ccxt.
-            "fetchFundingHistory": True,
             # WS: our DeltaWSClient implements watch_ohlcv
             "watchOHLCV": True,
         },
@@ -136,10 +130,6 @@ class Delta(Exchange):
         totp_secret = ex_cfg.get("totp_secret")
         if totp_secret:
             api.password = self._totp(totp_secret)
-        # freqtrade requires fetch_funding_history for open-trade fee calc.
-        # ccxt.delta doesn't implement it; bind a scoped no-op on OUR client
-        # instance (not a global ccxt monkeypatch) so funding fees are skipped.
-        api.fetch_funding_history = lambda symbol=None, since=None, params=None: []
         return api
 
     @staticmethod
@@ -246,8 +236,52 @@ class Delta(Exchange):
             "nextFundingDatetime": rate.get("nextFundingTime") and str(rate.get("nextFundingTime")),
         }
 
+    def fetch_funding_rates(self, **kwargs) -> dict[str, Any]:
+        """Return a dict of ccxt funding-rate dicts keyed by symbol.
+
+        CCXT-delta supports `fetch_funding_rates()`; freqtrade itself does not
+        call this, but other strategy or risk tools may rely on it.
+        """
+        rates = self._api.fetch_funding_rates(**kwargs)
+        return {pair: self._normalize_funding_rate(pair, rate) for pair, rate in rates.items()}
+
+    def _normalize_funding_rate(self, pair: str, rate: dict) -> dict[str, Any]:
+        """Normalize a CCXT funding-rate dict into the shape freqtrade expects."""
+        return {
+            "info": rate.get("info", {}),
+            "symbol": pair,
+            "markPrice": rate.get("markPrice"),
+            "indexPrice": rate.get("indexPrice"),
+            "interestRate": rate.get("interestRate", 0.0),
+            "estimatedSettlePrice": rate.get("estimatedSettlePrice"),
+            "timestamp": int(rate.get("timestamp", 0) or 0),
+            "datetime": rate.get("datetime"),
+            "fundingRate": float(rate.get("fundingRate") or rate.get("rate") or 0.0),
+            "fundingTimestamp": int(rate.get("nextFundingTime", 0) or 0),
+            "fundingDatetime": rate.get("nextFundingTime") and str(rate.get("nextFundingTime")),
+            "nextFundingTimestamp": int(rate.get("nextFundingTime", 0) or 0),
+            "nextFundingDatetime": rate.get("nextFundingTime") and str(rate.get("nextFundingTime")),
+        }
+
     # ------------------------------------------------------------------ #
-    # Stop orders (Delta has no ccxt stop support -> raw REST)
+    # Leverage / margin-mode introspection (native in CCXT-delta)
+    # ------------------------------------------------------------------ #
+    def fetch_leverage(self, pair: str, params: dict | None = None) -> dict[str, Any]:
+        """Return the current leverage for the pair.
+
+        Useful to verify that `_set_leverage` actually took effect on the
+        exchange.
+        """
+        params = params or {}
+        return self._api.fetch_leverage(pair, params)
+
+    def fetch_margin_mode(self, pair: str, params: dict | None = None) -> dict[str, Any]:
+        """Return the current margin mode (cross / isolated) for the pair."""
+        params = params or {}
+        return self._api.fetch_margin_mode(pair, params)
+
+    # ------------------------------------------------------------------ #
+    # Stop orders / take-profit (Delta has no ccxt stop support -> raw REST)
     # ------------------------------------------------------------------ #
     def create_stoploss(
         self,
@@ -258,244 +292,69 @@ class Delta(Exchange):
         side: str,
         leverage: float = 1.0,
     ) -> dict:
-        """Place a stop-market order on Delta to close the open position.
+        """Place a reduce-only stop-market order on Delta via ccxt.
 
-        ccxt.delta's createStopMarketOrder is not supported, so we call
-        Delta's REST API directly with a market order + stop_price. The
-        ``side`` argument from freqtrade is the *exit* side (sell for a
+        ccxt.delta's ``createStopMarketOrder`` is not supported, but
+        ``create_order`` accepts ``stop_price`` + ``reduce_only`` params.
+        The ``side`` argument from freqtrade is the *exit* side (sell for a
         long, buy for a short), so we use it directly as the close side.
+        freqtrade passes ``amount`` in base currency (BTC); ccxt.delta expects
+        number of contracts, so we divide by the contract size.
         Returns a ccxt-compatible order dict so freqtrade can track it.
         """
-        import hashlib
-        import hmac
-        import json as _json
-        import time
-
         close_side = str(side)
         logger.info(
             "Delta create_stoploss: pair=%s close_side=%s amount=%s stop_price=%s",
             pair, close_side, amount, stop_price,
         )
 
-        # Get host from config (needed for product_id resolution + order placement)
-        ex_cfg = self._config.get("exchange", {})
-        if ex_cfg.get("india"):
-            host = (
-                "https://cdn-ind.testnet.deltaex.org"
-                if ex_cfg.get("sandbox")
-                else "https://cdn.india.deltaex.org"
-            )
-        else:
-            host = self._api.urls.get("api", {}).get("private", "https://api.delta.exchange")
-
-        # Get product_id: Delta's REST API expects an integer product_id.
-        # ccxt's market dict may not include it, so resolve via the symbol.
         market = self.markets.get(pair, {})
-        product_id = market.get("id") or market.get("info", {}).get("product_id")
-        contract_value = None
-        if not product_id or (isinstance(product_id, str) and not product_id.isdigit()):
-            # Resolve from Delta's products endpoint
-            delta_symbol = pair.split("/")[0] + pair.split("/")[1].split(":")[0]
-            try:
-                import requests
-                r = requests.get(f"{host}/v2/products", headers={"User-Agent": "freqtrade"}, timeout=10)
-                products = r.json().get("result", [])
-                for p in products:
-                    if p.get("symbol") == delta_symbol:
-                        product_id = p["id"]
-                        contract_value = float(p.get("contract_value", 0.001))
-                        break
-            except Exception:
-                pass
-        if not product_id or (isinstance(product_id, str) and not product_id.isdigit()):
-            raise ccxt.ExchangeError(f"Could not resolve product_id for {pair}")
-        product_id = int(product_id)
-        # Delta size = number of contracts = amount / contract_value
-        if contract_value is None or contract_value == 0:
-            contract_value = 0.001  # default to BTC
-        size = int(round(amount / contract_value))
+        contract_size = float(market.get("contractSize") or 1.0)
+        contracts = self._api.amount_to_precision(pair, amount / contract_size)
 
-        api_key = ex_cfg.get("key", "") or self._api.apiKey or ""
-        api_secret = ex_cfg.get("secret", "") or self._api.secret or ""
-
-        ts = str(int(time.time()))
-        method = "POST"
-        path = "/v2/orders"
-        payload = _json.dumps({
-            "product_id": product_id,
-            "size": size,  # Delta size = contracts (amount / contract_value)
-            "side": close_side,
-            "order_type": "market_order",
-            "stop_price": str(stop_price),
-            "reduce_only": "true",
-        })
-
-        sig_data = method + ts + path + "" + payload
-        sig = hmac.new(api_secret.encode(), sig_data.encode(), hashlib.sha256).hexdigest()
-
-        headers = {
-            "api-key": api_key,
-            "timestamp": ts,
-            "signature": sig,
-            "User-Agent": "freqtrade-delta-exchange",
-            "Content-Type": "application/json",
-        }
-
-        import requests
-        r = requests.post(f"{host}{path}", data=payload, headers=headers, timeout=10)
-        resp = r.json()
-
-        if not resp.get("success"):
-            err = resp.get("error", resp)
-            # If no position exists (already closed by TP or manually), skip gracefully
-            if isinstance(err, dict) and err.get("code") == "no_position_for_reduce_only":
+        try:
+            order = self._api.create_order(
+                symbol=pair,
+                type="market",
+                side=close_side,
+                amount=contracts,
+                price=None,
+                params={
+                    "stop_price": self.price_to_precision(pair, stop_price),
+                    "reduce_only": True,
+                },
+            )
+        except ccxt.ExchangeError as e:
+            err = self._extract_error(e)
+            if err.get("code") == "no_position_for_reduce_only":
                 logger.debug("Delta stoploss skipped: no open position (already closed)")
-                return {"id": f"skipped_{int(time.time())}", "status": "closed",
-                        "type": "stop_market", "symbol": pair, "amount": 0, "price": 0}
-            raise ccxt.ExchangeError(f"Delta stop order failed: {err}")
+                return {
+                    "id": f"skipped_{self._api.milliseconds()}",
+                    "status": "closed",
+                    "type": "stop_market",
+                    "symbol": pair,
+                    "amount": 0,
+                    "price": 0,
+                }
+            raise
+        return order
 
-        order = resp.get("result", {})
-        return {
-            "id": str(order.get("id", "")),
-            "status": "open",
-            "type": "stop_market",
-            "side": close_side,
-            "amount": amount,
-            "price": stop_price,
-            "stopPrice": stop_price,
-            "symbol": pair,
-            "reduceOnly": True,
-            "info": order,
-        }
-
-    # ------------------------------------------------------------------ #
-    # Take-profit orders (Delta has no ccxt take-profit support -> raw REST)
-    # ------------------------------------------------------------------ #
-    def create_take_profit(
-        self,
-        pair: str,
-        amount: float,
-        take_profit_price: float,
-        side: str,
-        limit_price: float | None = None,
-    ) -> dict:
-        """Place a take-profit stop-limit order on Delta to close the open position.
-
-        Delta has no native ccxt take-profit support, so we call Delta's REST
-        API directly with a reduce-only limit order that is triggered when
-        ``stop_price`` is reached. The ``side`` argument from freqtrade is the
-        *exit* side (sell for a long, buy for a short), so we use it directly
-        as the close side. Returns a ccxt-compatible order dict so freqtrade
-        can track it.
-        """
-        import hashlib
-        import hmac
-        import json as _json
-        import time
-
-        close_side = str(side)
-        logger.info(
-            "Delta create_take_profit: pair=%s close_side=%s amount=%s tp_price=%s",
-            pair, close_side, amount, take_profit_price,
-        )
-
-        # Get host from config (needed for product_id resolution + order placement)
-        ex_cfg = self._config.get("exchange", {})
-        if ex_cfg.get("india"):
-            host = (
-                "https://cdn-ind.testnet.deltaex.org"
-                if ex_cfg.get("sandbox")
-                else "https://cdn.india.deltaex.org"
-            )
-        else:
-            host = self._api.urls.get("api", {}).get("private", "https://api.delta.exchange")
-
-        # Get product_id: Delta's REST API expects an integer product_id.
-        # ccxt's market dict may not include it, so resolve via the symbol.
-        market = self.markets.get(pair, {})
-        product_id = market.get("id") or market.get("info", {}).get("product_id")
-        contract_value = None
-        if not product_id or (isinstance(product_id, str) and not product_id.isdigit()):
-            # Resolve from Delta's products endpoint
-            delta_symbol = pair.split("/")[0] + pair.split("/")[1].split(":")[0]
-            try:
-                import requests
-                r = requests.get(
-                    f"{host}/v2/products",
-                    headers={"User-Agent": "freqtrade"},
-                    timeout=10,
-                )
-                products = r.json().get("result", [])
-                for p in products:
-                    if p.get("symbol") == delta_symbol:
-                        product_id = p["id"]
-                        contract_value = float(p.get("contract_value", 0.001))
-                        break
-            except Exception:
-                pass
-        if not product_id or (isinstance(product_id, str) and not product_id.isdigit()):
-            raise ccxt.ExchangeError(f"Could not resolve product_id for {pair}")
-        product_id = int(product_id)
-        # Delta size = number of contracts = amount / contract_value
-        if contract_value is None or contract_value == 0:
-            contract_value = 0.001  # default to BTC
-        size = int(round(amount / contract_value))
-
-        api_key = ex_cfg.get("key", "") or self._api.apiKey or ""
-        api_secret = ex_cfg.get("secret", "") or self._api.secret or ""
-
-        ts = str(int(time.time()))
-        method = "POST"
-        path = "/v2/orders"
-        # If no explicit limit price is provided, use the take-profit trigger price.
-        actual_limit_price = limit_price if limit_price is not None else take_profit_price
-        payload = _json.dumps({
-            "product_id": product_id,
-            "size": size,
-            "side": close_side,
-            "order_type": "limit_order",
-            "stop_price": str(take_profit_price),
-            "limit_price": str(actual_limit_price),
-            "reduce_only": "true",
-        })
-
-        sig_data = method + ts + path + "" + payload
-        sig = hmac.new(api_secret.encode(), sig_data.encode(), hashlib.sha256).hexdigest()
-
-        headers = {
-            "api-key": api_key,
-            "timestamp": ts,
-            "signature": sig,
-            "User-Agent": "freqtrade-delta-exchange",
-            "Content-Type": "application/json",
-        }
-
-        import requests
-        r = requests.post(f"{host}{path}", data=payload, headers=headers, timeout=10)
-        resp = r.json()
-
-        if not resp.get("success"):
-            err = resp.get("error", resp)
-            # If no position exists (already closed by SL or manually), skip gracefully
-            if isinstance(err, dict) and err.get("code") == "no_position_for_reduce_only":
-                logger.debug("Delta take-profit skipped: no open position (already closed)")
-                return {"id": f"skipped_{int(time.time())}", "status": "closed",
-                        "type": "limit", "symbol": pair, "amount": 0, "price": 0}
-            raise ccxt.ExchangeError(f"Delta take-profit order failed: {err}")
-
-        order = resp.get("result", {})
-        return {
-            "id": str(order.get("id", "")),
-            "status": "open",
-            "type": "limit",
-            "side": close_side,
-            "amount": amount,
-            "price": take_profit_price,
-            "stopPrice": take_profit_price,
-            "symbol": pair,
-            "reduceOnly": True,
-            "info": order,
-        }
+    @staticmethod
+    def _extract_error(error: Exception) -> dict:
+        """Best-effort parse of a ccxt ExchangeError payload."""
+        try:
+            msg = str(error)
+            # ccxt often wraps the exchange body as a stringified JSON dict.
+            start = msg.find("{")
+            end = msg.rfind("}")
+            if start != -1 and end != -1:
+                import json as _json
+                payload = _json.loads(msg[start:end + 1])
+                if isinstance(payload, dict):
+                    return payload.get("error", payload)
+        except Exception:
+            pass
+        return {}
 
     # ------------------------------------------------------------------ #
     # Funding rate history (freqtrade calls self._fetch_funding_rate_history)
@@ -515,7 +374,7 @@ class Delta(Exchange):
         return []
 
     # ------------------------------------------------------------------ #
-    # Leverage tiers (ccxt.delta has no fetchLeverageTiers)
+    # Leverage tiers (freqtrade backtesting needs synthetic tiers)
     # ------------------------------------------------------------------ #
     def get_leverage_tiers(self) -> dict[str, list[dict]]:
         """Delta exposes no leverage-tier endpoint; freqtrade needs tiers for
