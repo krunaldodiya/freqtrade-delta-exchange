@@ -132,7 +132,7 @@ class DeltaWSClient:
 
     def set_markets_from_exchange(self, other: Any) -> None:
         """Copy markets from the REST ccxt instance (freqtrade calls this)."""
-        if hasattr(other, "markets"):
+        if hasattr(other, "markets") and other.markets:
             self.markets = other.markets
             # Build pair <-> symbol mapping from markets
             for ft_pair, market in self.markets.items():
