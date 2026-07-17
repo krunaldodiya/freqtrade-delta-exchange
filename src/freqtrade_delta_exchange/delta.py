@@ -290,8 +290,8 @@ class Delta(Exchange):
         else:
             host = self._api.urls.get("api", {}).get("private", "https://api.delta.exchange")
 
-        api_key = ex_cfg.get("key", "")
-        api_secret = ex_cfg.get("secret", "")
+        api_key = ex_cfg.get("key", "") or self._api.apiKey or ""
+        api_secret = ex_cfg.get("secret", "") or self._api.secret or ""
 
         ts = str(int(time.time()))
         method = "POST"
