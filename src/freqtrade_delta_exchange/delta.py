@@ -261,16 +261,21 @@ class Delta(Exchange):
         """Place a stop-market order on Delta to close the open position.
 
         ccxt.delta's createStopMarketOrder is not supported, so we call
-        Delta's REST API directly with a market order + stop_price. Maps
-        freqtrade's entry 'side' to the opposite close side. Returns a
-        ccxt-compatible order dict so freqtrade can track it.
+        Delta's REST API directly with a market order + stop_price. The
+        ``side`` argument from freqtrade is the *exit* side (sell for a
+        long, buy for a short), so we use it directly as the close side.
+        Returns a ccxt-compatible order dict so freqtrade can track it.
         """
         import hashlib
         import hmac
         import json as _json
         import time
 
-        close_side = "sell" if side == "buy" else "buy"
+        close_side = str(side)
+        logger.info(
+            "Delta create_stoploss: pair=%s close_side=%s amount=%s stop_price=%s",
+            pair, close_side, amount, stop_price,
+        )
 
         # Get host from config (needed for product_id resolution + order placement)
         ex_cfg = self._config.get("exchange", {})
