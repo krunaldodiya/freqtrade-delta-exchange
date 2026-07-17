@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "freqtrade-delta-exchange"
-version = "0.1.0"
+version = "0.2.0"
 description = "Delta Exchange (delta.exchange) broker adapter for freqtrade — installable freqtrade plugin (REST Phase-1, websockets Phase-2)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,8 @@ dependencies = [
     # pulls cryptography>=49 which freqtrade 2026.6 is incompatible with,
     # so we cap below it. Matches freqtrade's own lower bound (>=4.5.4).
     "ccxt>=4.5.4,<4.5.66",
+    # Phase 2: native websocket streaming (agg_trades -> OHLCV aggregation)
+    "websockets>=12.0",
 ]
 
 [project.optional-dependencies]

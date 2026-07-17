@@ -15,14 +15,15 @@ Why this adapter exists:
   capability flags via `_ft_has` and maps the order/margin/stop plumbing
   freqtrade expects.
 
-Phase 1 = REST polling only (freqtrade's documented fallback). Phase 2 (TODO)
-  adds a native asyncio websocket client feeding freqtrade's WS pipeline, matching
-  the official exchanges.
+Phase 1 = REST polling (freqtrade's documented fallback).
+Phase 2 = native asyncio websocket client (delta_ws.DeltaWSClient) that
+  subscribes to Delta's agg_trades channel and builds OHLCV candles in-memory,
+  feeding freqtrade's ExchangeWS pipeline — matching official exchanges.
 
 Hosts / environments:
   - International Delta (default): api.delta.exchange, demo = testnet-api.delta.exchange.
-  - Delta India (exchange.india = true): api.india.delta.exchange, LIVE ONLY
-    (India has no testnet/sandbox API). BTC perp symbol = BTC/USD:USD, USD-settled.
+  - Delta India (exchange.india = true): cdn.india.deltaex.org (live),
+    cdn-ind.testnet.deltaex.org (demo). BTC perp symbol = BTC/USD:USD, USD-settled.
 
 2FA: Delta API keys with 2FA enabled must sign every request with the current TOTP
   in the request `password`. The adapter reads `exchange.totp_secret` (supplied via a
@@ -47,7 +48,7 @@ class Delta(Exchange):
 
     _ft_has: FtHas = {
         "ohlcv_has_history": True,
-        "ws_enabled": False,  # Phase1: REST polling only
+        "ws_enabled": True,  # Phase2: native WS via DeltaWSClient
         "stoploss_on_exchange": True,
         "exchange_has_overrides": {
             # ccxt.delta under-reports these; we implement them in the class
@@ -56,6 +57,8 @@ class Delta(Exchange):
             # freqtrade calls _api.fetch_funding_history for open-trade fee calc;
             # we bind a no-op on our client instance in _init_ccxt.
             "fetchFundingHistory": True,
+            # WS: our DeltaWSClient implements watch_ohlcv
+            "watchOHLCV": True,
         },
     }
     _ft_has_futures: FtHas = {
@@ -93,9 +96,12 @@ class Delta(Exchange):
     def _init_ccxt(self, exchange_config: dict[str, Any], sync: bool, ccxt_kwargs: dict[str, Any]):
         """Build the ccxt client, route to the right Delta host, inject 2FA TOTP.
 
+        Phase 2: when sync=False (async mode, used for WS), return a DeltaWSClient
+        instead of ccxt.delta so freqtrade's ExchangeWS gets a proper watch_ohlcv.
+
         Host routing:
           - india + sandbox=true  -> cdn-ind.testnet.deltaex.org  (DEMO / paper)
-          - india + sandbox=false -> api.india.delta.exchange      (LIVE)
+          - india + sandbox=false -> cdn.india.deltaex.org        (LIVE)
           - international + sandbox=true -> set_sandbox_mode(True) (testnet-api.delta.exchange)
           - international + sandbox=false -> api.delta.exchange    (live)
         urls["api"] must stay a dict of sub-apis (never a bare string).
@@ -103,6 +109,16 @@ class Delta(Exchange):
         compute the current 2FA code and set api.password so every signed request
         is authenticated. Rotates every 30s; computed at init per run.
         """
+        # Phase 2: async path -> return our custom WS client
+        if not sync:
+            from .delta_ws import DeltaWSClient
+            ex_cfg = self._config.get("exchange", {})
+            return DeltaWSClient(
+                config=self._config,
+                india=ex_cfg.get("india", False),
+                sandbox=ex_cfg.get("sandbox", False),
+            )
+
         api = super()._init_ccxt(exchange_config, sync, ccxt_kwargs)
         ex_cfg = self._config.get("exchange", {})
         if ex_cfg.get("india"):
