@@ -311,8 +311,8 @@ class Delta(Exchange):
         method = "POST"
         path = "/v2/orders"
         payload = _json.dumps({
-            "product_id": int(product_id) if str(product_id).isdigit() else product_id,
-            "size": amount,
+            "product_id": product_id,
+            "size": int(round(amount * 1000)),  # Delta size = contracts (1 contract = 0.001 BTC)
             "side": close_side,
             "order_type": "market_order",
             "stop_price": str(stop_price),
