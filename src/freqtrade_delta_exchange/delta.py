@@ -369,6 +369,135 @@ class Delta(Exchange):
         }
 
     # ------------------------------------------------------------------ #
+    # Take-profit orders (Delta has no ccxt take-profit support -> raw REST)
+    # ------------------------------------------------------------------ #
+    def create_take_profit(
+        self,
+        pair: str,
+        amount: float,
+        take_profit_price: float,
+        side: str,
+        limit_price: float | None = None,
+    ) -> dict:
+        """Place a take-profit stop-limit order on Delta to close the open position.
+
+        Delta has no native ccxt take-profit support, so we call Delta's REST
+        API directly with a reduce-only limit order that is triggered when
+        ``stop_price`` is reached. The ``side`` argument from freqtrade is the
+        *exit* side (sell for a long, buy for a short), so we use it directly
+        as the close side. Returns a ccxt-compatible order dict so freqtrade
+        can track it.
+        """
+        import hashlib
+        import hmac
+        import json as _json
+        import time
+
+        close_side = str(side)
+        logger.info(
+            "Delta create_take_profit: pair=%s close_side=%s amount=%s tp_price=%s",
+            pair, close_side, amount, take_profit_price,
+        )
+
+        # Get host from config (needed for product_id resolution + order placement)
+        ex_cfg = self._config.get("exchange", {})
+        if ex_cfg.get("india"):
+            host = (
+                "https://cdn-ind.testnet.deltaex.org"
+                if ex_cfg.get("sandbox")
+                else "https://cdn.india.deltaex.org"
+            )
+        else:
+            host = self._api.urls.get("api", {}).get("private", "https://api.delta.exchange")
+
+        # Get product_id: Delta's REST API expects an integer product_id.
+        # ccxt's market dict may not include it, so resolve via the symbol.
+        market = self.markets.get(pair, {})
+        product_id = market.get("id") or market.get("info", {}).get("product_id")
+        contract_value = None
+        if not product_id or (isinstance(product_id, str) and not product_id.isdigit()):
+            # Resolve from Delta's products endpoint
+            delta_symbol = pair.split("/")[0] + pair.split("/")[1].split(":")[0]
+            try:
+                import requests
+                r = requests.get(
+                    f"{host}/v2/products",
+                    headers={"User-Agent": "freqtrade"},
+                    timeout=10,
+                )
+                products = r.json().get("result", [])
+                for p in products:
+                    if p.get("symbol") == delta_symbol:
+                        product_id = p["id"]
+                        contract_value = float(p.get("contract_value", 0.001))
+                        break
+            except Exception:
+                pass
+        if not product_id or (isinstance(product_id, str) and not product_id.isdigit()):
+            raise ccxt.ExchangeError(f"Could not resolve product_id for {pair}")
+        product_id = int(product_id)
+        # Delta size = number of contracts = amount / contract_value
+        if contract_value is None or contract_value == 0:
+            contract_value = 0.001  # default to BTC
+        size = int(round(amount / contract_value))
+
+        api_key = ex_cfg.get("key", "") or self._api.apiKey or ""
+        api_secret = ex_cfg.get("secret", "") or self._api.secret or ""
+
+        ts = str(int(time.time()))
+        method = "POST"
+        path = "/v2/orders"
+        # If no explicit limit price is provided, use the take-profit trigger price.
+        actual_limit_price = limit_price if limit_price is not None else take_profit_price
+        payload = _json.dumps({
+            "product_id": product_id,
+            "size": size,
+            "side": close_side,
+            "order_type": "limit_order",
+            "stop_price": str(take_profit_price),
+            "limit_price": str(actual_limit_price),
+            "reduce_only": "true",
+        })
+
+        sig_data = method + ts + path + "" + payload
+        sig = hmac.new(api_secret.encode(), sig_data.encode(), hashlib.sha256).hexdigest()
+
+        headers = {
+            "api-key": api_key,
+            "timestamp": ts,
+            "signature": sig,
+            "User-Agent": "freqtrade-delta-exchange",
+            "Content-Type": "application/json",
+        }
+
+        import requests
+        r = requests.post(f"{host}{path}", data=payload, headers=headers, timeout=10)
+        resp = r.json()
+
+        if not resp.get("success"):
+            err = resp.get("error", resp)
+            # If no position exists (already closed by SL or manually), skip gracefully
+            if isinstance(err, dict) and err.get("code") == "no_position_for_reduce_only":
+                logger.debug("Delta take-profit skipped: no open position (already closed)")
+                return {"id": f"skipped_{int(time.time())}", "status": "closed",
+                        "type": "limit", "symbol": pair, "amount": 0, "price": 0}
+            raise ccxt.ExchangeError(f"Delta take-profit order failed: {err}")
+
+        order = resp.get("result", {})
+        return {
+            "id": str(order.get("id", "")),
+            "status": "open",
+            "type": "limit",
+            "side": close_side,
+            "amount": amount,
+            "price": take_profit_price,
+            "stopPrice": take_profit_price,
+            "symbol": pair,
+            "reduceOnly": True,
+            "info": order,
+        }
+
+    # ------------------------------------------------------------------ #
     # Funding rate history (freqtrade calls self._fetch_funding_rate_history)
     # ------------------------------------------------------------------ #
     async def _fetch_funding_rate_history(
