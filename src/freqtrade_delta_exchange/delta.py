@@ -287,6 +287,7 @@ class Delta(Exchange):
         # ccxt's market dict may not include it, so resolve via the symbol.
         market = self.markets.get(pair, {})
         product_id = market.get("id") or market.get("info", {}).get("product_id")
+        contract_value = None
         if not product_id or (isinstance(product_id, str) and not product_id.isdigit()):
             # Resolve from Delta's products endpoint
             delta_symbol = pair.split("/")[0] + pair.split("/")[1].split(":")[0]
@@ -297,12 +298,17 @@ class Delta(Exchange):
                 for p in products:
                     if p.get("symbol") == delta_symbol:
                         product_id = p["id"]
+                        contract_value = float(p.get("contract_value", 0.001))
                         break
             except Exception:
                 pass
         if not product_id or (isinstance(product_id, str) and not product_id.isdigit()):
             raise ccxt.ExchangeError(f"Could not resolve product_id for {pair}")
         product_id = int(product_id)
+        # Delta size = number of contracts = amount / contract_value
+        if contract_value is None or contract_value == 0:
+            contract_value = 0.001  # default to BTC
+        size = int(round(amount / contract_value))
 
         api_key = ex_cfg.get("key", "") or self._api.apiKey or ""
         api_secret = ex_cfg.get("secret", "") or self._api.secret or ""
@@ -312,7 +318,7 @@ class Delta(Exchange):
         path = "/v2/orders"
         payload = _json.dumps({
             "product_id": product_id,
-            "size": int(round(amount * 1000)),  # Delta size = contracts (1 contract = 0.001 BTC)
+            "size": size,  # Delta size = contracts (amount / contract_value)
             "side": close_side,
             "order_type": "market_order",
             "stop_price": str(stop_price),
