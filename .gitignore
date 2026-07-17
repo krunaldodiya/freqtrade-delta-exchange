@@ -1,0 +1,25 @@
+# Build artifacts
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# Runtime / local state
+__pycache__/
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+tradesv3*.sqlite*
+
+# Secrets — never commit API keys
+*secrets*.json
+*-secret*.json
+.env
+.env.*
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.venv/

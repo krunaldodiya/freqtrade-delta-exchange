@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.freqtrade.io/schema.json",
+  "max_open_trades": 1,
+  "stake_currency": "USD",
+  "stake_amount": "unlimited",
+  "tradable_balance_ratio": 0.99,
+  "fiat_display_currency": "USD",
+  "dry_run": false,
+  "trading_mode": "futures",
+  "margin_mode": "cross",
+  "fee": 0.0004,
+  "minimal_roi": { "0": 0.001 },
+  "stoploss": -0.001,
+  "unfilledtimeout": { "entry": 60, "exit": 10, "exit_timeout_count": 0, "unit": "minutes" },
+  "exchange": {
+    "name": "delta",
+    "india": true,
+    "sandbox": true,
+    "key": "",
+    "secret": "",
+    "totp_secret": "",
+    "ccxt_config": {},
+    "ccxt_async_config": {},
+    "pair_whitelist": ["BTC/USD:USD"],
+    "pair_blacklist": []
+  },
+  "exit_pricing": {
+    "price_side": "other",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
+  "entry_pricing": {
+    "price_side": "other",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
+  "pairlists": [{ "method": "StaticPairList" }],
+  "order_types": {
+    "entry": "market",
+    "exit": "market",
+    "emergency_exit": "market",
+    "force_exit": "market",
+    "force_entry": "market",
+    "stoploss": "market",
+    "stoploss_on_exchange": false
+  },
+  "user_data_dir": "user_data",
+  "datadir": "user_data/data",
+  "strategy": "DryRunSmoke",
+  "strategy_path": "user_data/strategies/dry_run_smoke/",
+  "initial_state": "running",
+  "internals": { "process_throttle_secs": 5 }
+}

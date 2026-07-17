@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "freqtrade-delta-exchange"
+version = "0.1.0"
+description = "Delta Exchange (delta.exchange) broker adapter for freqtrade — installable freqtrade plugin (REST Phase-1, websockets Phase-2)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "krunaldodiya", email = "krunaldodiya@users.noreply.github.com" }]
+keywords = ["freqtrade", "delta-exchange", "trading", "crypto", "futures"]
+dependencies = [
+    "freqtrade",
+    # Pin ccxt to what freqtrade 2026.6 supports. The newest ccxt (4.5.66)
+    # pulls cryptography>=49 which freqtrade 2026.6 is incompatible with,
+    # so we cap below it. Matches freqtrade's own lower bound (>=4.5.4).
+    "ccxt>=4.5.4,<4.5.66",
+]
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+[project.urls]
+Homepage = "https://github.com/krunaldodiya/freqtrade-delta-exchange"
+Repository = "https://github.com/krunaldodiya/freqtrade-delta-exchange"
+Issues = "https://github.com/krunaldodiya/freqtrade-delta-exchange/issues"
+Documentation = "https://github.com/krunaldodiya/freqtrade-delta-exchange#readme"
+
+# freqtrade discovers custom exchanges via this plugin entry-point group.
+# Installing the package registers Delta as freqtrade.exchange.Delta.
+[project.entry-points."freqtrade.plugins.exchange"]
+delta = "freqtrade_delta_exchange.delta:Delta"
+
+# Auto-register Delta into freqtrade.exchange at interpreter startup so that
+# every `freqtrade ...` command finds it (freqtrade only resolves exchanges that
+# are attributes of the installed freqtrade.exchange module). This .pth hook
+# imports the package on startup — it does NOT modify freqtrade's own code and
+# survives freqtrade reinstalls.
+[tool.hatch.build.targets.wheel.force-include]
+"freqtrade_delta_exchange.pth" = "freqtrade_delta_exchange.pth"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/freqtrade_delta_exchange"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
