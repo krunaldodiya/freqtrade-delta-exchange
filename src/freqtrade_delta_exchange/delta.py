@@ -336,6 +336,10 @@ class Delta(Exchange):
 
         if not resp.get("success"):
             err = resp.get("error", resp)
+            # If no position exists (already closed by TP or manually), skip gracefully
+            if isinstance(err, dict) and err.get("code") == "no_position_for_reduce_only":
+                logger.debug("Delta stoploss skipped: no open position (already closed)")
+                return {"id": "", "status": "closed", "type": "stop_market", "symbol": pair}
             raise ccxt.ExchangeError(f"Delta stop order failed: {err}")
 
         order = resp.get("result", {})
