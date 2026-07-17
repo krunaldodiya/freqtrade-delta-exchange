@@ -36,9 +36,12 @@ Never commit credentials.
 from typing import Any
 
 import ccxt
+import logging
 from freqtrade.enums import MarginMode, TradingMode
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import FtHas
+
+logger = logging.getLogger(__name__)
 
 
 class Delta(Exchange):
@@ -96,8 +99,14 @@ class Delta(Exchange):
     def _init_ccxt(self, exchange_config: dict[str, Any], sync: bool, ccxt_kwargs: dict[str, Any]):
         """Build the ccxt client, route to the right Delta host, inject 2FA TOTP.
 
-        Phase 2: when sync=False (async mode, used for WS), return a DeltaWSClient
-        instead of ccxt.delta so freqtrade's ExchangeWS gets a proper watch_ohlcv.
+        Phase 2: freqtrade calls _init_ccxt twice:
+          - sync=True  -> REST sync client (self._api)
+          - sync=False  -> REST async client (self._api_async) + WS client (self._ws_async)
+        Both sync/async return a ccxt.delta instance with India host routing.
+        The WS client (DeltaWSClient) is created separately by freqtrade at line 289
+        via self._ws_async = self._init_ccxt(...) — but we can't distinguish that
+        call from the _api_async call. Instead, we override the property that
+        freqtrade checks for WS support so ExchangeWS gets our DeltaWSClient.
 
         Host routing:
           - india + sandbox=true  -> cdn-ind.testnet.deltaex.org  (DEMO / paper)
@@ -109,16 +118,7 @@ class Delta(Exchange):
         compute the current 2FA code and set api.password so every signed request
         is authenticated. Rotates every 30s; computed at init per run.
         """
-        # Phase 2: async path -> return our custom WS client
-        if not sync:
-            from .delta_ws import DeltaWSClient
-            ex_cfg = self._config.get("exchange", {})
-            return DeltaWSClient(
-                config=self._config,
-                india=ex_cfg.get("india", False),
-                sandbox=ex_cfg.get("sandbox", False),
-            )
-
+        # Both sync and async paths get a ccxt.delta instance with India routing.
         api = super()._init_ccxt(exchange_config, sync, ccxt_kwargs)
         ex_cfg = self._config.get("exchange", {})
         if ex_cfg.get("india"):
@@ -158,6 +158,31 @@ class Delta(Exchange):
         offset = digest[-1] & 0x0F
         code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 10 ** 6
         return f"{code:06d}"
+
+    # ------------------------------------------------------------------ #
+    # Phase 2: swap freqtrade's WS async client with our DeltaWSClient
+    # ------------------------------------------------------------------ #
+    def ft_additional_exchange_init(self) -> None:
+        """Called by Exchange.__init__ after markets load. Replace the WS
+        async client (which is a plain ccxt.delta with no watch_ohlcv) with
+        our custom DeltaWSClient that implements native WS streaming.
+        """
+        if not self._ft_has.get("ws_enabled"):
+            return
+        if not self._exchange_ws:
+            return
+        from .delta_ws import DeltaWSClient
+        ex_cfg = self._config.get("exchange", {})
+        ws_client = DeltaWSClient(
+            config=self._config,
+            india=ex_cfg.get("india", False),
+            sandbox=ex_cfg.get("sandbox", False),
+        )
+        # Copy markets from the REST client for pair<->symbol mapping
+        ws_client.set_markets_from_exchange(self._api)
+        # Replace the ccxt object inside ExchangeWS
+        self._exchange_ws._ccxt_object = ws_client
+        logger.info("Delta WS: DeltaWSClient installed for native streaming")
 
     # ------------------------------------------------------------------ #
     # Margin / leverage  (signatures match freqtrade.exchange.Exchange)
