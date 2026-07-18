@@ -38,6 +38,7 @@ from typing import Any
 import ccxt
 import logging
 from freqtrade.enums import MarginMode, TradingMode
+from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import FtHas
 
@@ -69,6 +70,9 @@ class Delta(Exchange):
         "exchange_has_overrides": {
             # Delta has no fetchFundingHistory; tell freqtrade not to call it live.
             "fetchFundingHistory": False,
+            # ccxt.delta reports fetchLeverageTiers=False, but we provide synthetic
+            # tiers in get_leverage_tiers() below; let freqtrade call it.
+            "fetchLeverageTiers": True,
         },
         "has_delisting": True,
     }
@@ -440,3 +444,62 @@ class Delta(Exchange):
         if not symbols:
             symbols = list(self._config.get("exchange", {}).get("pair_whitelist", []))
         return {symbol: [dict(tier)] for symbol in symbols}
+
+    # ------------------------------------------------------------------ #
+    # Liquidation price — cross + isolated (base class only supports isolated)
+    # ------------------------------------------------------------------ #
+    def dry_run_liquidation_price(
+        self,
+        pair: str,
+        open_rate: float,
+        is_short: bool,
+        amount: float,
+        stake_amount: float,
+        leverage: float,
+        wallet_balance: float,
+        open_trades: list,
+    ) -> float | None:
+        """Liquidation price for Delta's linear (USD-settled) perps.
+
+        Uses the standard gate.io-style linear formula from freqtrade's base
+        docstring: liq = (open_rate ∓ margin/amount) / (1 ∓ (mmr + taker_fee)).
+        For cross margin, ``margin`` is the full wallet balance adjusted by the
+        other positions' unrealized PnL minus their maintenance margin — the
+        same cross_vars accounting freqtrade's Binance class uses.
+        """
+        market = self.markets[pair]
+        taker_fee_rate = market["taker"] or self._api.describe().get("fees", {}).get(
+            "trading", {}
+        ).get("taker", 0.0005)
+        mm_ratio, _ = self.get_maintenance_ratio_and_amt(pair, stake_amount)
+
+        if self.trading_mode != TradingMode.FUTURES:
+            raise OperationalException("Delta adapter supports futures only")
+        if market["inverse"]:
+            raise OperationalException("Freqtrade does not yet support inverse contracts")
+
+        cross_vars: float = 0.0
+        if self.margin_mode == MarginMode.CROSS:
+            mm_ex_1: float = 0.0
+            upnl_ex_1: float = 0.0
+            for trade in open_trades:
+                if trade.pair == pair:
+                    # Only "other" trades are considered
+                    continue
+                # Fall back to open rate for backtesting (no live mark price)
+                mark_price = trade.open_rate
+                if self._config["runmode"] in ("live", "dry_run"):
+                    mark_price = self.fetch_ticker(trade.pair)["last"]
+                mm_ratio1, _ = self.get_maintenance_ratio_and_amt(
+                    trade.pair, trade.stake_amount
+                )
+                mm_ex_1 += trade.amount * mark_price * mm_ratio1
+                upnl_ex_1 += trade.amount * mark_price - trade.amount * trade.open_rate
+            cross_vars = upnl_ex_1 - mm_ex_1
+
+        margin = wallet_balance + cross_vars
+        value = margin / amount
+        mm_ratio_taker = mm_ratio + taker_fee_rate
+        if is_short:
+            return (open_rate + value) / (1 + mm_ratio_taker)
+        return (open_rate - value) / (1 - mm_ratio_taker)
