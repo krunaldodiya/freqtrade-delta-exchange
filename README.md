@@ -30,17 +30,18 @@ endpoints, markets, and currencies:
 |---|---|---|
 | Config flag | (default) | `"india": true` |
 | Demo host | `testnet-api.delta.exchange` | `cdn-ind.testnet.deltaex.org` |
-| Live host | `api.delta.exchange` | `cdn.india.deltaex.org` |
+| Live host | `api.delta.exchange` | `api.india.delta.exchange` |
 | BTC perp symbol | `BTC/USDT:USDT` | `BTC/USD:USD` |
 | Settle currency | USDT | USD (`stake_currency: "USD"`) |
 
 When `"india": true`:
   - `"sandbox": true`  → **demo/testnet** `cdn-ind.testnet.deltaex.org` (paper, no real money)
-  - `"sandbox": false` → **live** `cdn.india.deltaex.org`
+  - `"sandbox": false` → **live** `api.india.delta.exchange`
 
-> Note: earlier assumptions that `cdn.india.deltaex.org` is "only a CDN" were
-> wrong — it is a fully working trading API host (authenticates, serves markets
-> and balances). It is the correct live host for Delta India.
+> Note: `api.india.delta.exchange` is the documented production gateway for
+> Delta India (see https://docs.delta.exchange — "Verify the Correct
+> Environment"). The `cdn.india.deltaex.org` host serves the same backend but
+> is not the documented live API.
 
 ### Capability gaps handled the official way
 

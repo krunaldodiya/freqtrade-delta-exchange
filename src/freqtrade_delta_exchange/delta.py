@@ -20,9 +20,9 @@ Phase 2 = native asyncio websocket client (delta_ws.DeltaWSClient) that
   subscribes to Delta's agg_trades channel and builds OHLCV candles in-memory,
   feeding freqtrade's ExchangeWS pipeline — matching official exchanges.
 
-Hosts / environments:
+Hosts / environments (per https://docs.delta.exchange):
   - International Delta (default): api.delta.exchange, demo = testnet-api.delta.exchange.
-  - Delta India (exchange.india = true): cdn.india.deltaex.org (live),
+  - Delta India (exchange.india = true): api.india.delta.exchange (live),
     cdn-ind.testnet.deltaex.org (demo). BTC perp symbol = BTC/USD:USD, USD-settled.
 
 2FA: Delta API keys with 2FA enabled must sign every request with the current TOTP
@@ -105,9 +105,10 @@ class Delta(Exchange):
         call from the _api_async call. Instead, we override the property that
         freqtrade checks for WS support so ExchangeWS gets our DeltaWSClient.
 
-        Host routing:
+        Host routing (per https://docs.delta.exchange — "Verify the Correct
+        Environment"):
           - india + sandbox=true  -> cdn-ind.testnet.deltaex.org  (DEMO / paper)
-          - india + sandbox=false -> cdn.india.deltaex.org        (LIVE)
+          - india + sandbox=false -> api.india.delta.exchange     (LIVE)
           - international + sandbox=true -> set_sandbox_mode(True) (testnet-api.delta.exchange)
           - international + sandbox=false -> api.delta.exchange    (live)
         urls["api"] must stay a dict of sub-apis (never a bare string).
@@ -123,7 +124,7 @@ class Delta(Exchange):
             host = (
                 "https://cdn-ind.testnet.deltaex.org"
                 if ex_cfg.get("sandbox")
-                else "https://cdn.india.deltaex.org"
+                else "https://api.india.delta.exchange"
             )
             api.urls["api"] = {"public": host, "private": host}
         elif self._config.get("dry_run") or ex_cfg.get("sandbox"):
@@ -323,6 +324,10 @@ class Delta(Exchange):
                 amount=contracts,
                 price=None,
                 params={
+                    # Delta requires stop_order_type to treat the order as a
+                    # resting stop; without it stop_price is ignored and the
+                    # market order fills immediately.
+                    "stop_order_type": "stop_loss_order",
                     "stop_price": self.price_to_precision(pair, stop_price),
                     "reduce_only": True,
                 },
